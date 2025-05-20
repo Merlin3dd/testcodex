@@ -1,244 +1,223 @@
-from __future__ import annotations
-import gzip, io, math, os, threading, zipfile, hashlib, pathlib, time, logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Tuple
+"""
+radio_viewshed_server.py  ·  Copernicus DSM 10 m
+POST /radio_viewshed → GeoJSON MultiPolygon с видимыми пятнами
+"""
 
-import boto3, numpy as np, rasterio, requests
-from botocore import UNSIGNED
-from botocore.client import Config
+from __future__ import annotations
+import hashlib, math, os, pathlib, time, logging, threading, concurrent.futures
+from typing import Dict, Tuple, List
+
+import numpy as np, rasterio, requests
+from rasterio.enums import Resampling
+from rasterio.features import shapes
+from shapely.geometry import MultiPolygon, shape, mapping
+from shapely.ops import unary_union
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from pyproj import Geod
-from shapely.geometry import LineString, mapping
+from pyproj import Geod, Transformer
+from tqdm import tqdm
+from numba import njit
 
-# ──────────────────────────────  logging  ──────────────────────────────
+# ──────────────────────── logging ────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("horizon")
+logging.basicConfig(level=LOG_LEVEL,
+                    format="%(asctime)s [%(levelname)7s] %(name)s: %(message)s")
+log = logging.getLogger("viewshed")
 
-# ────────────────────────────  константы  ──────────────────────────────
+# ──────────────────────── constants ──────────────────────
 EARTH_RADIUS_M = 6_371_000.0
 geod = Geod(ellps="WGS84")
-NODATA = -32768
 
-# ───────────────────  Copernicus DEM — локальный и S3  ──────────────────
-COP_DIR = pathlib.Path(os.getenv("COP_DIR", "./copernicus"))
+COP_DIR = pathlib.Path(os.getenv("COP_DIR", "./copernicus")).expanduser()
 COP_DIR.mkdir(parents=True, exist_ok=True)
-log.info("COP_DIR  = %s", COP_DIR.resolve())
+BUCKET = "https://copernicus-dem-30m.s3.amazonaws.com"
 
-s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+# ──────────────────────── DEM loader ─────────────────────
+def _key(lat: int, lon: int) -> str:
+    ns = "N" if lat >= 0 else "S"
+    ew = "E" if lon >= 0 else "W"
+    stem = f"Copernicus_DSM_COG_10_{ns}{abs(lat):02d}_00_{ew}{abs(lon):03d}_00_DEM"
+    return f"{stem}/{stem}.tif"
 
-def cop_path(lat:int, lon:int)->pathlib.Path:
-    ns = "N" if lat>=0 else "S"; ew = "E" if lon>=0 else "W"
-    return COP_DIR/f"Copernicus_DSM_COG_10_{ns}{abs(lat):02d}_00_{ew}{abs(lon):03d}_00_DEM.tif"
+def _path(lat: int, lon: int) -> pathlib.Path:
+    return COP_DIR / pathlib.Path(_key(lat, lon)).name
 
-def md5(path: pathlib.Path, buf=1<<20)->str:
+def _md5(fname: pathlib.Path, buf: int = 1 << 20) -> str:
     h = hashlib.md5()
-    with path.open("rb") as f:
-        while chunk := f.read(buf):
+    with fname.open("rb") as f:
+        chunk = f.read(buf)
+        while chunk:
             h.update(chunk)
+            chunk = f.read(buf)
     return h.hexdigest()
 
-def download_cop(lat:int, lon:int)->pathlib.Path:
-    dst = cop_path(lat, lon)
-    key = f"{dst.stem}/{dst.stem}.tif"
+def _etag(k: str) -> str:
+    r = requests.head(f"{BUCKET}/{k}", timeout=20)
+    r.raise_for_status()
+    return r.headers["ETag"].strip('"')
 
-    if dst.exists():
-        etag = s3.head_object(Bucket="copernicus-dem-30m", Key=key)["ETag"].strip('"')
-        if "-" in etag or md5(dst) == etag:
-            log.debug("Copernicus tile %s already cached", dst.name)
-            return dst
-        log.warning("Copernicus MD5 mismatch -> re-download %s", dst.name)
-        dst.unlink(missing_ok=True)
+def _download(lat: int, lon: int) -> pathlib.Path:
+    k, dst = _key(lat, lon), _path(lat, lon)
+    et = _etag(k)
+    if dst.exists() and ("-" in et or _md5(dst) == et):
+        log.debug("DEM cache hit %s", dst.name)
+        return dst
 
+    log.info("DEM downloading %s …", dst.name)
+    url = f"{BUCKET}/{k}"
+    r = requests.get(url, stream=True, timeout=120)
+    r.raise_for_status()
+    total = int(r.headers.get("Content-Length", 0))
+    bar = tqdm(total=total, unit="B", unit_scale=True, unit_divisor=1024,
+               desc=f"↓ {dst.name}", leave=False)
     tmp = dst.with_suffix(".part")
-    log.info("Downloading Copernicus %s …", dst.name)
-    t0 = time.time()
-    s3.download_file("copernicus-dem-30m", key, str(tmp))
-    t1 = time.time()
-    speed = tmp.stat().st_size / (t1 - t0) / 1024 / 1024
-    log.info("Copernicus %s downloaded (%.1f MiB, %.1f MB/s)",
-             dst.name, tmp.stat().st_size/1048576, speed)
+    with tmp.open("wb") as f:
+        for chunk in r.iter_content(1 << 15):
+            f.write(chunk)
+            bar.update(len(chunk))
+    bar.close()
 
-    etag = s3.head_object(Bucket="copernicus-dem-30m", Key=key)["ETag"].strip('"')
-    if "-" not in etag and md5(tmp) != etag:
-        tmp.unlink(missing_ok=True)
-        raise IOError("MD5 mismatch on Copernicus tile")
+    if "-" not in et and _md5(tmp) != et:
+        tmp.unlink()
+        raise IOError("MD5 mismatch after download")
     tmp.rename(dst)
+    log.info("DEM saved %s (%.1f MiB)", dst.name, total / 1048576)
     return dst
 
-class CopTile:
-    def __init__(self, lat:int, lon:int):
-        self.lat, self.lon = lat, lon
-        self.path = download_cop(lat, lon)
-        self.ds   = rasterio.open(self.path)
-        log.debug("Opened Copernicus raster %s", self.path.name)
-    def elevation(self, x:float, y:float)->float:
-        val = next(self.ds.sample([(x,y)]))[0]
-        return float(val) if val != self.ds.nodata else 0.0
+class Tile:
+    __slots__ = ("arr", "inv")
+    def __init__(self, lat: int, lon: int):
+        fp = _download(lat, lon)
+        with rasterio.open(fp) as ds:
+            self.arr = ds.read(1).astype(np.float32)
+            self.arr[self.arr == ds.nodata] = 0
+            self.inv = ~ds.transform
+        log.debug("Tile %s loaded into RAM", fp.name)
 
-class CopManager:
-    def __init__(self):
-        self.tiles: Dict[Tuple[int,int], CopTile|None] = {}
-        self.lock = threading.Lock()
-    def _tile(self, lon:float, lat:float):
-        key = (int(math.floor(lat)), int(math.floor(lon)))
-        with self.lock:
-            if key not in self.tiles:
-                try:
-                    self.tiles[key] = CopTile(*key)
-                except Exception as e:
-                    log.warning("Copernicus tile %s unavailable: %s", key, e)
-                    self.tiles[key] = None
-            return self.tiles[key]
-    def elevation(self, lon:float, lat:float)->float|None:
-        tile = self._tile(lon, lat)
-        return tile.elevation(lon, lat) if tile else None
-COP = CopManager()
+    def sample(self, lons: np.ndarray, lats: np.ndarray) -> np.ndarray:
+        col, row = self.inv * (lons, lats)
+        col = np.clip(col.astype(int), 0, self.arr.shape[1] - 1)
+        row = np.clip(row.astype(int), 0, self.arr.shape[0] - 1)
+        return self.arr[row, col]
 
-# ────────────────────────────  SRTM (.hgt)  ────────────────────────────
-SRTM_DIR = pathlib.Path(os.getenv("SRTM_DIR", "./srtm_cache"))
-SRTM_DIR.mkdir(parents=True, exist_ok=True)
-log.info("SRTM_DIR = %s", SRTM_DIR.resolve())
+DEM_CACHE: Dict[Tuple[int, int], Tile] = {}
+LOCK = threading.Lock()
 
-MAPZEN = "https://s3.amazonaws.com/elevation-tiles-prod/skadi/{t}/{t}.hgt.gz"
-ESA    = "https://step.esa.int/auxdata/dem/SRTMGL1/{t}.SRTMGL1.hgt.zip"
+def tile(lon: float, lat: float) -> Tile:
+    key = (int(math.floor(lat)), int(math.floor(lon)))
+    with LOCK:
+        if key not in DEM_CACHE:
+            DEM_CACHE[key] = Tile(*key)
+        return DEM_CACHE[key]
 
-def tname(lat:int, lon:int)->str:
-    return f"{'N' if lat>=0 else 'S'}{abs(lat):02d}{'E' if lon>=0 else 'W'}{abs(lon):03d}"
+def elev_vec(lons: np.ndarray, lats: np.ndarray) -> np.ndarray:
+    return tile(lons[0], lats[0]).sample(lons, lats)
 
-def urls(tile:str): return [(MAPZEN.format(t=tile),"gz"), (ESA.format(t=tile),"zip")]
+# ──────────────────────── Numba LOS ──────────────────────
+@njit(fastmath=True, cache=True)
+def _line_of_sight(elev_line, obs_h, obj_h, r_eff, step):
+    vis = np.zeros(elev_line.size, np.bool_)
+    max_t = -1e20
+    for i in range(elev_line.size):
+        s = (i + 1) * step
+        tan = (elev_line[i] + obj_h - (s * s) / (2 * r_eff) - obs_h) / s
+        if tan > max_t:
+            max_t = tan
+            vis[i] = True
+    return vis
 
-class SrtmTile:
-    def __init__(self, lat:int, lon:int):
-        self.lat, self.lon = lat, lon
-        self.tile = tname(lat, lon)
-        self.hgt  = SRTM_DIR/f"{self.tile}.hgt"
-        self.arr  = None
-        self.samples = None
-        self.lock = threading.Lock()
+# ──────────────────────── FastAPI models ─────────────────
+class ViewshedReq(BaseModel):
+    lat: float
+    lon: float
+    height_m: float
+    obj_height_m: float = 0
+    max_distance_km: float = 100
+    grid_step_m: float = 100
+    k_factor: float = Field(4/3)
 
-    def _download(self):
-        for url, kind in urls(self.tile):
-            try:
-                r = requests.get(url, timeout=30)
-                if r.status_code == 404:
-                    continue
-                r.raise_for_status()
-                log.info("Downloading SRTM %s from %s", self.tile, url.split('/')[2])
-                if kind == "gz":
-                    with gzip.GzipFile(fileobj=io.BytesIO(r.content)) as g, open(self.hgt,"wb") as o:
-                        o.write(g.read())
-                else:
-                    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                        with z.open(z.namelist()[0]) as src, open(self.hgt,"wb") as dst:
-                            dst.write(src.read())
-                return
-            except requests.RequestException as e:
-                log.debug("Failed %s: %s", url, e)
-        raise FileNotFoundError(self.tile)
+class ViewshedResp(BaseModel):
+    geojson: dict
+    visible_ratio: float
 
-    def _load(self):
-        if self.arr is not None:
-            return
-        with self.lock:
-            if self.arr is not None:
-                return
-            if not self.hgt.exists():
-                self._download()
-            data = np.fromfile(self.hgt, dtype=">i2").astype(np.float32)
-            self.samples = int(round(math.sqrt(data.size)))
-            self.arr = data.reshape((self.samples, self.samples))
-            self.arr[self.arr == NODATA] = np.nan
-            log.debug("Loaded SRTM %s (%dx%d)", self.tile, self.samples, self.samples)
-
-    def elev(self, lon:float, lat:float)->float:
-        self._load()
-        row = int((self.lat + 1 - lat)*(self.samples-1))
-        col = int((lon - self.lon)*(self.samples-1))
-        row, col = np.clip(row, 0, self.samples-1), np.clip(col, 0, self.samples-1)
-        v = self.arr[row, col]
-        return float(v) if not np.isnan(v) else 0.
-
-class SrtmManager:
-    def __init__(self):
-        self.tiles: Dict[Tuple[int,int], SrtmTile] = {}
-        self.lock = threading.Lock()
-    def _tile(self, lon, lat):
-        key = (int(math.floor(lat)), int(math.floor(lon)))
-        with self.lock:
-            if key not in self.tiles:
-                self.tiles[key] = SrtmTile(*key)
-            return self.tiles[key]
-    def elevation(self, lon, lat): return self._tile(lon, lat).elev(lon, lat)
-SRTM = SrtmManager()
-
-# ──────────────────────────  единая функция высоты  ─────────────────────────
-def elevation(lon:float, lat:float)->float:
-    h = COP.elevation(lon, lat)
-    source = "COP" if h is not None else "SRTM"
-    val = h if h is not None else SRTM.elevation(lon, lat)
-    log.debug("Elevation at (%.4f, %.4f) = %.1f via %s", lat, lon, val, source)
-    return val
-
-# ────────────────────────────  FastAPI слой  ───────────────────────────────
-class Req(BaseModel):
-    lat:float; lon:float; height_m:float
-    max_distance_km:float=100; azimuth_step_deg:float=1
-    sample_step_m:float=100; k_factor:float=Field(4/3)
-class Resp(BaseModel):
-    geojson:dict; points:List[Tuple[float,float]]
-
-app = FastAPI(title="Radio Horizon API", version="3.2")
-
+app = FastAPI(title="Copernicus viewshed", version="1.0")
 @app.get("/health")
-async def health(): return {"status":"ok"}
+async def health(): return {"ok": True}
 
-def trace(az, req:Req, o_msl, r_eff, max_d):
-    s, best, max_ang = req.sample_step_m, (req.lon, req.lat), -math.inf
-    while s <= max_d:
-        lon2, lat2, _ = geod.fwd(req.lon, req.lat, az, s)
-        g = elevation(lon2, lat2)
-        ang = math.atan2(g - (s**2)/(2*r_eff) - o_msl, s)
-        if ang > max_ang:
-            max_ang, best = ang, (lon2, lat2)
-        s += req.sample_step_m
-    return best
+# ──────────────────────── main algorithm ─────────────────
+@app.post("/radio_viewshed", response_model=ViewshedResp)
+async def radio_viewshed(req: ViewshedReq):
+    if req.obj_height_m < 0:
+        raise HTTPException(400, "obj_height_m ≥ 0")
+    if not (-60 <= req.lat <= 60):
+        raise HTTPException(400, "Copernicus ограничен ±60°")
 
-def horizon(req:Req):
-    log.info("Start horizon calc lat=%.5f lon=%.5f h=%.1f m …",
-             req.lat, req.lon, req.height_m)
     t0 = time.time()
-    obs_msl = elevation(req.lon, req.lat) + req.height_m
-    r_eff, max_d = EARTH_RADIUS_M*req.k_factor, req.max_distance_km*1000
-    az = np.arange(0, 360, req.azimuth_step_deg)
-    pts = [None]*len(az)
-    with ThreadPoolExecutor() as pool:
-        fut = {pool.submit(trace, a, req, obs_msl, r_eff, max_d): i
-               for i, a in enumerate(az)}
-        for f in as_completed(fut):
-            pts[fut[f]] = f.result()
-    dt = time.time() - t0
-    log.info("Horizon calc done in %.2f s (%.1f azimuths)", dt, len(az))
-    return pts
+    step = req.grid_step_m
+    R = req.max_distance_km * 1000
 
-@app.post("/radio_horizon", response_model=Resp)
-async def radio(req:Req):
-    if not(-60 <= req.lat <= 60):
-        raise HTTPException(400, "DEM покрывает ±60°")
-    if not(0 < req.azimuth_step_deg <= 10):
-        raise HTTPException(400, "azimuth_step_deg (0,10]")
-    if req.sample_step_m <= 0:
-        raise HTTPException(400, "sample_step_m > 0")
-    pts = horizon(req); ls = LineString(pts + [pts[0]])
-    return Resp(geojson={"type":"Feature","geometry":mapping(ls),
-                         "properties":req.dict()}, points=pts)
+    # 1) локальная UTM проекция
+    utm_zone = int((req.lon + 180) // 6) + 1
+    crs_utm = f"+proj=utm +zone={utm_zone} +datum=WGS84 +units=m +no_defs"
+    to_utm = Transformer.from_crs(4326, crs_utm, always_xy=True)
+    to_geo = Transformer.from_crs(crs_utm, 4326, always_xy=True)
+    ox, oy = to_utm.transform(req.lon, req.lat)
+
+    n = int(2 * R / step) + 1
+    xs = np.linspace(ox - R, ox + R, n)
+    ys = np.linspace(oy - R, oy + R, n)
+
+    # 2) читаем DEM кусок, ресемплируем на нужный шаг
+    lat_min, lon_min = to_geo.transform(xs[0], ys[-1])
+    lat_max, lon_max = to_geo.transform(xs[-1], ys[0])
+    fp = _path(int(math.floor(req.lat)), int(math.floor(req.lon)))
+    with rasterio.open(fp) as ds:
+        window = rasterio.windows.from_bounds(lon_min, lat_min, lon_max, lat_max,
+                                              ds.transform)
+        arr = ds.read(
+            1,
+            window=window,
+            out_shape=(n, n),
+            resampling=Resampling.bilinear
+        ).astype(np.float32)
+        arr[arr == ds.nodata] = 0
+
+    obs_h = elev_vec(np.array([req.lon]), np.array([req.lat]))[0] + req.height_m
+    r_eff = EARTH_RADIUS_M * req.k_factor
+
+    visible = np.zeros_like(arr, dtype=np.bool_)
+
+    # 3) LOS по строкам
+    mid = n // 2
+    for r in range(n):
+        vis_r = _line_of_sight(arr[r, mid + 1:], obs_h, req.obj_height_m, r_eff, step)
+        visible[r, mid + 1:][vis_r] = True
+        vis_l = _line_of_sight(arr[r, mid - 1::-1], obs_h, req.obj_height_m, r_eff, step)
+        visible[r, :mid][vis_l[::-1]] = True
+
+    # 4) LOS по столбцам
+    for c in range(n):
+        vis_up = _line_of_sight(arr[mid - 1::-1, c], obs_h, req.obj_height_m, r_eff, step)
+        visible[:mid, c][vis_up[::-1]] = True
+        vis_dn = _line_of_sight(arr[mid + 1:, c], obs_h, req.obj_height_m, r_eff, step)
+        visible[mid + 1:, c][vis_dn] = True
+
+    vis_ratio = round(visible.mean() * 100, 2)
+    log.info("mask ready in %.2f s, visible %.2f %%", time.time() - t0, vis_ratio)
+
+    # 5) бинарный растр → полигоны
+    trans = rasterio.transform.from_origin(xs[0] - step / 2, ys[-1] - step / 2,
+                                           step, step)
+    polys = []
+    for geom, val in shapes(visible.astype(np.uint8), transform=trans):
+        if val == 1:
+            polys.append(shape(geom))
+    union = unary_union(polys)
+    geojson = mapping(union)
+
+    return ViewshedResp(geojson=geojson, visible_ratio=vis_ratio)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("radio_horizon_server:app",
-                host="0.0.0.0", port=8011,
+    uvicorn.run("radio_viewshed_server:app", host="0.0.0.0", port=8011,
                 log_level=LOG_LEVEL.lower())
