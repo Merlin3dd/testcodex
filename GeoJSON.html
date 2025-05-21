@@ -1,46 +1,33 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8" />
-  <title>MultiLineString demo</title>
+<!-- Leaflet + proj4 + turf -->
+<link  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" rel="stylesheet">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/proj4@2.9.0/dist/proj4.js"></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
-  <!-- Leaflet -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-  <style>
-    html,body,#map{height:100%;margin:0;}
-  </style>
-</head>
-<body>
-<div id="map"></div>
-
+<div id="map" style="height:100vh"></div>
 <script>
 (async () => {
-  /* 1. Загружаем ваш JSON (там уже MultiLineString) */
-  const data = await fetch('data.json').then(r => r.json());
+  const { geojson } = await fetch('data.json').then(r=>r.json()); // MultiPolygon EPSG:32636
 
-  /* 2. Карта */
-  const map = L.map('map').setView([44.95, 34.11], 12);
+  // регистрируем проекцию
+  proj4.defs('EPSG:32636', '+proj=utm +zone=36 +datum=WGS84 +units=m +no_defs');
+  const toWGS84 = coords => proj4('EPSG:32636','EPSG:4326',coords);
 
-  /* 3. Тайлы */
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution:'© OSM'
-  }).addTo(map);
+  // рекурсивно переводим все координаты
+  function convertCoords(coords){
+    return (typeof coords[0]==='number')
+      ? toWGS84(coords)
+      : coords.map(convertCoords);
+  }
+  const geojson4326 = JSON.parse(JSON.stringify(geojson)); // глубокая копия
+  geojson4326.coordinates = convertCoords(geojson.coordinates);
 
-  /* 4. Добавляем GeoJSON.  MultiLineString рисуется одним вызовом. */
-  const layer = L.geoJSON(data.geojson, {
-    style: { color:'#ff3333', weight:2 },
+  // обычная Web-Mercator-карта
+  const map = L.map('map').setView([44.9,34.1], 12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+              { attribution:'© OSM' }).addTo(map);
 
-    /* если нужны pop-up’ы по каждой линии: */
-    onEachFeature:(f,l)=>l.bindPopup(
-      f.geometry.type + '<br>длина: ' + (l.getLatLngs().flat().length)+' сегм.'
-    )
-  }).addTo(map);
-
-  /* 5. Отмасштабировать */
+  const layer = L.geoJSON(geojson4326, { style:{ color:'#29a', weight:1 } }).addTo(map);
   map.fitBounds(layer.getBounds(), { padding:[20,20] });
 })();
 </script>
-</body>
-</html>

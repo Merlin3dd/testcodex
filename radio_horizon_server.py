@@ -6,7 +6,7 @@ POST /radio_viewshed → GeoJSON MultiPolygon с видимыми пятнами
 from __future__ import annotations
 import hashlib, math, os, pathlib, time, logging, threading, concurrent.futures
 from typing import Dict, Tuple, List
-
+import rasterio, rasterio.merge, rasterio.warp
 import numpy as np, rasterio, requests
 from rasterio.enums import Resampling
 from rasterio.features import shapes
@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 from pyproj import Geod, Transformer
 from tqdm import tqdm
 from numba import njit
-
 # ──────────────────────── logging ────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL,
@@ -114,8 +113,9 @@ def elev_vec(lons: np.ndarray, lats: np.ndarray) -> np.ndarray:
     return tile(lons[0], lats[0]).sample(lons, lats)
 
 # ──────────────────────── Numba LOS ──────────────────────
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _line_of_sight(elev_line, obs_h, obj_h, r_eff, step):
+
     vis = np.zeros(elev_line.size, np.bool_)
     max_t = -1e20
     for i in range(elev_line.size):
@@ -145,75 +145,131 @@ app = FastAPI(title="Copernicus viewshed", version="1.0")
 async def health(): return {"ok": True}
 
 # ──────────────────────── main algorithm ─────────────────
+def mosaic_dem(lat_min, lon_min, lat_max, lon_max, out_shape, resampling):
+    """
+    Склеить все тайлы, перекрывающие рамку, и ресемплировать
+    в out_shape (n_rows, n_cols).  Возвращает (array, transform).
+    """
+    lats = range(int(math.floor(lat_min)), int(math.ceil(lat_max)))
+    lons = range(int(math.floor(lon_min)), int(math.ceil(lon_max)))
+    srcs = [
+        rasterio.open(_download(la, lo))  # гарантированно существует
+        for la in lats for lo in lons
+    ]
+
+    # ① склейка без ресэмпла, в исходной геодезической проекции
+    mosaic, trans0 = rasterio.merge.merge(srcs)
+    for s in srcs:
+        s.close()
+
+    # ② задаём целевой grid
+    dst_rows, dst_cols = out_shape
+    dst = np.empty(out_shape, dtype=np.float32)
+    dst_trans = rasterio.transform.from_bounds(
+        lon_min, lat_min, lon_max, lat_max, dst_cols, dst_rows
+    )
+
+    # ③ reproject → сразу Bilinear, nodata→0
+    rasterio.warp.reproject(
+        source=mosaic[0],
+        destination=dst,
+        src_transform=trans0,
+        src_crs="EPSG:4326",
+        dst_transform=dst_trans,
+        dst_crs="EPSG:4326",
+        resampling=resampling,
+    )
+    dst[np.isnan(dst)] = 0
+    return dst, dst_trans
+from numba import njit, prange
+
+@njit(fastmath=True, parallel=True, cache=True)
+def _viewshed_360(arr, step, obs_h, obj_h, r_eff):
+    """
+    Быстрый круговой viewshed: arr — квадратная DEM (n×n), наблюдатель в центре.
+    Возвращает bool-маску видимости.
+    """
+    n   = arr.shape[0]
+    mid = n // 2
+    R   = (n - 1) * step / 2.0
+    dθ  = math.atan(step / R)            # минимальный угол, чтобы зацепить клетку
+    n_ang = int(2 * math.pi / dθ) + 1
+
+    visible = np.zeros((n, n), np.bool_)
+
+    for a in prange(n_ang):
+        ang = a * dθ
+        dx  =  math.cos(ang)
+        dy  = -math.sin(ang)             # y растёт вниз
+
+        max_t = -1e20
+        for i in range(1, n):
+            xf = mid + dx * i
+            yf = mid + dy * i
+            xi = int(xf)
+            yi = int(yf)
+            if xi < 0 or yi < 0 or xi >= n or yi >= n:
+                break                    # вышли за пределы квадрата
+
+            s   = i * step
+            tan = (arr[yi, xi] + obj_h - (s * s) / (2 * r_eff) - obs_h) / s
+            if tan > max_t:              # клетка видна
+                max_t      = tan
+                visible[yi, xi] = True
+    return visible
 @app.post("/radio_viewshed", response_model=ViewshedResp)
 async def radio_viewshed(req: ViewshedReq):
+    # ────── проверки входных данных ──────────────────────────────
     if req.obj_height_m < 0:
         raise HTTPException(400, "obj_height_m ≥ 0")
     if not (-60 <= req.lat <= 60):
         raise HTTPException(400, "Copernicus ограничен ±60°")
 
-    t0 = time.time()
-    step = req.grid_step_m
-    R = req.max_distance_km * 1000
+    t0   = time.time()
+    step = req.grid_step_m                      # шаг DEM (м)
+    R    = req.max_distance_km * 1_000          # радиус расчёта (м)
 
-    # 1) локальная UTM проекция
+    # ────── локальная UTM-проекция ───────────────────────────────
     utm_zone = int((req.lon + 180) // 6) + 1
-    crs_utm = f"+proj=utm +zone={utm_zone} +datum=WGS84 +units=m +no_defs"
-    to_utm = Transformer.from_crs(4326, crs_utm, always_xy=True)
-    to_geo = Transformer.from_crs(crs_utm, 4326, always_xy=True)
-    ox, oy = to_utm.transform(req.lon, req.lat)
+    crs_utm  = f"+proj=utm +zone={utm_zone} +datum=WGS84 +units=m +no_defs"
+    to_utm   = Transformer.from_crs(4326, crs_utm, always_xy=True)
+    to_geo   = Transformer.from_crs(crs_utm, 4326, always_xy=True)
+    ox, oy   = to_utm.transform(req.lon, req.lat)        # центр в метрах
 
-    n = int(2 * R / step) + 1
-    xs = np.linspace(ox - R, ox + R, n)
-    ys = np.linspace(oy - R, oy + R, n)
+    # ────── квадратная матрица DEM вокруг точки ─────────────────
+    n  = int(2 * R / step) + 1                          # кол-во пикселей
+    xs = np.linspace(ox - R, ox + R, n)                 # UTM-X
+    ys = np.linspace(oy - R, oy + R, n)                 # UTM-Y
 
-    # 2) читаем DEM кусок, ресемплируем на нужный шаг
-    lat_min, lon_min = to_geo.transform(xs[0], ys[-1])
-    lat_max, lon_max = to_geo.transform(xs[-1], ys[0])
-    fp = _path(int(math.floor(req.lat)), int(math.floor(req.lon)))
-    with rasterio.open(fp) as ds:
-        window = rasterio.windows.from_bounds(lon_min, lat_min, lon_max, lat_max,
-                                              ds.transform)
-        arr = ds.read(
-            1,
-            window=window,
-            out_shape=(n, n),
-            resampling=Resampling.bilinear
-        ).astype(np.float32)
-        arr[arr == ds.nodata] = 0
+    lon_w, lat_n = to_geo.transform(xs[0],   ys[-1])    # NW-угол
+    lon_e, lat_s = to_geo.transform(xs[-1],  ys[0])     # SE-угол
+    lon_min, lon_max = sorted((lon_w, lon_e))
+    lat_min, lat_max = sorted((lat_s, lat_n))
 
+    arr, _ = mosaic_dem(lat_min, lon_min, lat_max, lon_max,
+                        out_shape=(n, n),
+                        resampling=Resampling.bilinear)
+
+    # ────── подготовка высот/радиусов ────────────────────────────
     obs_h = elev_vec(np.array([req.lon]), np.array([req.lat]))[0] + req.height_m
-    r_eff = EARTH_RADIUS_M * req.k_factor
+    r_eff = EARTH_RADIUS_M * req.k_factor            # эффективный радиус
 
-    visible = np.zeros_like(arr, dtype=np.bool_)
+    visible = np.zeros_like(arr, dtype=np.bool_)     # итоговая маска
+    mid     = n // 2                                 # индекс наблюдателя
 
-    # 3) LOS по строкам
-    mid = n // 2
-    for r in range(n):
-        vis_r = _line_of_sight(arr[r, mid + 1:], obs_h, req.obj_height_m, r_eff, step)
-        visible[r, mid + 1:][vis_r] = True
-        vis_l = _line_of_sight(arr[r, mid - 1::-1], obs_h, req.obj_height_m, r_eff, step)
-        visible[r, :mid][vis_l[::-1]] = True
-
-    # 4) LOS по столбцам
-    for c in range(n):
-        vis_up = _line_of_sight(arr[mid - 1::-1, c], obs_h, req.obj_height_m, r_eff, step)
-        visible[:mid, c][vis_up[::-1]] = True
-        vis_dn = _line_of_sight(arr[mid + 1:, c], obs_h, req.obj_height_m, r_eff, step)
-        visible[mid + 1:, c][vis_dn] = True
-
+    # ────── РАДИАЛЬНЫЙ ПРОХОД ПО ВСЕМ АЗИМУТАМ ───────────────────
+    # угловой шаг: чтобы луч «зацепил» каждую ячейку
+    visible = _viewshed_360(arr, step, obs_h, req.obj_height_m, r_eff)
     vis_ratio = round(visible.mean() * 100, 2)
-    log.info("mask ready in %.2f s, visible %.2f %%", time.time() - t0, vis_ratio)
 
-    # 5) бинарный растр → полигоны
-    trans = rasterio.transform.from_origin(xs[0] - step / 2, ys[-1] - step / 2,
+
+    # ────── бинарная маска → GeoJSON-мультиполигон ───────────────
+    trans = rasterio.transform.from_origin(xs[0] - step / 2,
+                                           ys[-1] - step / 2,
                                            step, step)
-    polys = []
-    for geom, val in shapes(visible.astype(np.uint8), transform=trans):
-        if val == 1:
-            polys.append(shape(geom))
-    union = unary_union(polys)
-    geojson = mapping(union)
+    polys = [shape(geom) for geom, val in
+             shapes(visible.astype(np.uint8), transform=trans) if val == 1]
+    geojson = mapping(unary_union(polys))
 
     return ViewshedResp(geojson=geojson, visible_ratio=vis_ratio)
 
