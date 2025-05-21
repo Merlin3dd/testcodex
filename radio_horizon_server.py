@@ -27,7 +27,7 @@ log = logging.getLogger("viewshed")
 EARTH_RADIUS_M = 6_371_000.0
 geod = Geod(ellps="WGS84")
 
-COP_DIR = pathlib.Path(os.getenv("COP_DIR", "./copernicus")).expanduser()
+COP_DIR = pathlib.Path(os.getenv("COP_DIR", "/home/user/work/dem_raw/")).expanduser()
 COP_DIR.mkdir(parents=True, exist_ok=True)
 BUCKET = "https://copernicus-dem-30m.s3.amazonaws.com"
 
