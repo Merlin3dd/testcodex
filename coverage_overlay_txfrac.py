@@ -2,6 +2,7 @@
 """
 coverage_txfrac.py – учитывает передатчик, только если
   area(intersection) / area(tx) ≥ --min-tx-frac
+Ускоренная версия: spatial index, batch intersections
 """
 from __future__ import annotations
 import argparse, json, hashlib, sys
@@ -19,7 +20,6 @@ WGS84 = "EPSG:4326"; WEBM = "EPSG:3857"
 COLORS = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
           "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
 
-# ---------- helpers -------------------------------------------------
 def _h(o:Any)->str: return hashlib.sha1(json.dumps(o,sort_keys=True).encode()).hexdigest()
 def _swap(g):       return transform(lambda x,y,*a:(y,x,*a),g)
 def _req(url:str,tx:dict):
@@ -34,24 +34,31 @@ def _is_longlat(g) -> bool:
     minx,miny,maxx,maxy = g.bounds
     return all(-180<=v<=180 for v in (minx,maxx)) and all(-90<=v<=90 for v in (miny,maxy))
 
-# ---------- overlay -------------------------------------------------
+# ---------- Быстрый overlay с spatial index -------------------------
 def union_txfrac(gdfs:List[gpd.GeoDataFrame], min_frac:float)->gpd.GeoDataFrame:
     all_polys = gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True), crs=WEBM)
-    # атомарная «плитка»
     pieces = gpd.overlay(all_polys, all_polys, how="union", keep_geom_type=False)
-
-    area_tx = all_polys.set_index("tx_id").geometry.area   # площадь каждого Tx
+    area_tx = all_polys.set_index("tx_id").geometry.area
     pieces["n_tx"] = 0
+    sindex = all_polys.sindex  # spatial index по всем полигонам
 
+    # Для каждого Tx ищем только те куски, которые могут пересекаться с ним
     for tx_id, geom in zip(all_polys["tx_id"], all_polys.geometry):
-        overlap = pieces.geometry.intersection(geom)
-        mask = (overlap.area / area_tx[tx_id]) >= min_frac
-        pieces.loc[mask, "n_tx"] += 1
+        tx_area = area_tx[tx_id]
+        # Быстро находим индексы потенциальных пересечений по bounding box
+        possible_idx = list(sindex.intersection(geom.bounds))
+        possible_pieces = pieces.iloc[possible_idx]
+        # Пересечения только с этими кусками
+        overlaps = possible_pieces.geometry.intersection(geom)
+        mask = (overlaps.area / tx_area) >= min_frac
+        idxs = possible_pieces.index[mask]
+        pieces.loc[idxs, "n_tx"] += 1
+
     return pieces
 
 # ---------- CLI / main ---------------------------------------------
 def main():
-    ap = argparse.ArgumentParser("Overlay with per-TX area threshold")
+    ap = argparse.ArgumentParser("Overlay with per-TX area threshold (accelerated)")
     ap.add_argument("tx_json"); ap.add_argument("--server", default="http://10.11.0.50:8011")
     ap.add_argument("--out", default="coverage_txfrac.html")
     ap.add_argument("--min-tx-frac", type=float, default=0.05, metavar="FRACTION")
@@ -65,12 +72,9 @@ def main():
     for i, tx in enumerate(txs, 1):
         g = _req_cached(args.server, tx)
         if args.swap_axes: g = _swap(g)
-
-        # если сервер дал градусы → переводим в метры
         if _is_longlat(g):
             g = transform(to3857, g)
-
-        gdfs.append(gpd.GeoDataFrame({"tx_id":[i]}, geometry=[g], crs=WEBM))
+        gdfs.append(gpd.GeoDataFrame({"tx_id":[i]}, geometry=[g], crs=WEBM, ))
 
     to4326 = Transformer.from_crs(WEBM, WGS84, always_xy=True).transform
     unioned = union_txfrac(gdfs, args.min_tx_frac)
