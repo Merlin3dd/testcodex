@@ -1,17 +1,1 @@
-[
-  {
-    "lat": 45.048475,
-    "lon": 34.31602,
-    "height_m": 30
-  },
-  {
-    "lat": 45.062507,
-    "lon": 34.60578,
-    "height_m": 45
-  },
-  {
-    "lat": 44.95388,
-    "lon": 34.433424,
-    "height_m": 15
-  }
-]
+[{"lat" : 44.404414, "lon" : 34.003348, "height_m" : 15, "max_distance_km" : 100}, {"lat" : 45.71386, "lon" : 34.372367, "height_m" : 15, "max_distance_km" : 100}, {"lat" : 44.577861, "lon" : 33.611982, "height_m" : 15, "max_distance_km" : 100}, {"lat" : 45.17096, "lon" : 35.18429, "height_m" : 15, "max_distance_km" : 100}, {"lat" : 45.762178, "lon" : 33.514847, "height_m" : 15, "max_distance_km" : 100}, {"lat" : 45.505165, "lon" : 33.016343, "height_m" : 15, "max_distance_km" : 100}, {"lat" : 45.421338, "lon" : 35.818612, "height_m" : 15, "max_distance_km" : 100}, {"lat" : 44.94773, "lon" : 34.099678, "height_m" : 15, "max_distance_km" : 100}, {"lat" : 44.608364, "lon" : 33.46171, "height_m" : 15, "max_distance_km" : 100}, {"lat" : 45.112941, "lon" : 33.986763, "height_m" : 15, "max_distance_km" : 100}]
