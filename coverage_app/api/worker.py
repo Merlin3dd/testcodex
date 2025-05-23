@@ -1,5 +1,5 @@
 from pathlib import Path
-import asyncio, json, uuid
+import asyncio, json, uuid, time
 from shapely.ops import transform          # ← было забыто
 from coverage_txfrac_async import (
     gather_viewsheds, union_txfrac_vec,
@@ -19,7 +19,7 @@ COLORS = [
 async def run_coverage_async(
     tx_json_path: Path,
     server: str = "http://10.11.0.50:8011",
-    out_dir: Path = Path("app/static/maps"),
+    out_dir: Path = Path(__file__).resolve().parents[2] / "static" / "maps",
     out_name: str | None = None,
     swap_axes: bool = False,
     concurrency: int = 16,
@@ -40,14 +40,20 @@ async def run_coverage_async(
     out_file = out_dir / out_name
 
     # --- читаем входной JSON --------------------------------------------------
+    t_read = time.perf_counter()
     txs = json.load(tx_json_path.open("r", encoding="utf-8"))
+    print(f"✔ Loaded {len(txs)} TX from {tx_json_path} in {time.perf_counter() - t_read:.1f}s")
 
     # --- получаем все viewshed-слои ------------------------------------------
+    print("✔ Fetching viewsheds…")
+    t_vis = time.perf_counter()
     gdfs = await gather_viewsheds(
         server, txs, swap_axes, concurrency, max_connections
     )
+    print(f"✔ Viewsheds fetched in {time.perf_counter() - t_vis:.1f}s")
 
     # --- формируем итоговый слой ---------------------------------------------
+    t_cov = time.perf_counter()
     if mode == "parcel":
         if not parcels_path:
             raise ValueError("Для режима parcel требуется файл parcels")
@@ -60,6 +66,9 @@ async def run_coverage_async(
 
     else:                               # union
         gdf_vis = union_txfrac_vec(gdfs, min_tx_frac)
+
+    dt_cov = time.perf_counter() - t_cov
+    print(f"\u2714 Coverage ({mode}) computed in {dt_cov:.1f}s")
 
     # --- перевод в WGS-84 -----------------------------------------------------
     to4326 = Transformer.from_crs(WEBM, WGS84, always_xy=True).transform
@@ -97,4 +106,5 @@ async def run_coverage_async(
     folium.LayerControl().add_to(m)
 
     m.save(out_file)
+    print(f"✔ Map saved: {out_file}")
     return f"/static/maps/{out_name}"

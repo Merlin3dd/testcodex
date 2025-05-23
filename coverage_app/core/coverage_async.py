@@ -264,18 +264,24 @@ def main():
     t0 = time.perf_counter()
 
     # ── читаем список TX-запросов ───────────────────────────────
+    t_read = time.perf_counter()
     txs = json.load(open(args.tx_json, encoding="utf-8"))
+    print(f"✔ Loaded {len(txs)} TX from {args.tx_json} in {time.perf_counter() - t_read:.1f}s")
     if not isinstance(txs, list):
         print("✘ Ожидается JSON-массив объектов", file=sys.stderr)
         sys.exit(1)
 
     # ── параллельно получаем GeoDataFrame-ы --───────────────────
+    print("✔ Fetching viewsheds…")
+    t_vis = time.perf_counter()
     gdfs = asyncio.run(
         gather_viewsheds(args.server, txs, args.swap_axes,
                          args.concurrency, args.max_connections)
     )
+    print(f"✔ Viewsheds fetched in {time.perf_counter() - t_vis:.1f}s")
 
     # ── «участковый» или «старый» режим визуализации ────────────
+    t_cov = time.perf_counter()
     if args.mode == "parcel":
         if not args.parcels:
             sys.exit("✘ Для режима parcel нужен --parcels <файл/URL>")
@@ -290,6 +296,9 @@ def main():
 
     else:  # union
         gdf_vis = union_txfrac_vec(gdfs, args.min_tx_frac)
+
+    dt_cov = time.perf_counter() - t_cov
+    print(f"\u2714 Coverage ({args.mode}) computed in {dt_cov:.1f}s")
 
     # ── переводим итоговый слой в WGS-84 ───────────────────────────
     to4326 = Transformer.from_crs(WEBM, WGS84, always_xy=True).transform
