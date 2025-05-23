@@ -22,6 +22,5 @@ gdal = "^3.9"            # нужен только для radio_server
 tqdm = "^4.66"
 
 [tool.poetry.scripts]
-coverage-cli = "coverage_app.cli.coverage_cli:app"
 serve-ui      = "coverage_app.api.main:start_ui"
 serve-radio   = "coverage_app.core.radio_server:start_server"
