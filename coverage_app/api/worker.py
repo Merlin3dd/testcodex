@@ -1,5 +1,5 @@
 from pathlib import Path
-import asyncio, json, uuid
+import asyncio, json, uuid, time
 from shapely.ops import transform          # ← было забыто
 from coverage_txfrac_async import (
     gather_viewsheds, union_txfrac_vec,
@@ -48,6 +48,7 @@ async def run_coverage_async(
     )
 
     # --- формируем итоговый слой ---------------------------------------------
+    t_cov = time.perf_counter()
     if mode == "parcel":
         if not parcels_path:
             raise ValueError("Для режима parcel требуется файл parcels")
@@ -60,6 +61,9 @@ async def run_coverage_async(
 
     else:                               # union
         gdf_vis = union_txfrac_vec(gdfs, min_tx_frac)
+
+    dt_cov = time.perf_counter() - t_cov
+    print(f"\u2714 Coverage ({mode}) computed in {dt_cov:.1f}s")
 
     # --- перевод в WGS-84 -----------------------------------------------------
     to4326 = Transformer.from_crs(WEBM, WGS84, always_xy=True).transform
