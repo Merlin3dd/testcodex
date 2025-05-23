@@ -31,6 +31,7 @@ import folium, branca.colormap as cm
 from tqdm import tqdm
 import rasterio
 import rasterio.features as rio_features
+from ..utils import find_parcels
 # ───────────────────────── constants ──────────────────────────
 CACHE = Path("../../.coverage_cache")
 CACHE.mkdir(exist_ok=True)
@@ -276,10 +277,14 @@ def main():
     )
 
     # ── «участковый» или «старый» режим визуализации ────────────
+    t_cov = time.perf_counter()
     if args.mode == "parcel":
-        if not args.parcels:
+        parcels_path = args.parcels or find_parcels()
+        if parcels_path:
+            print(f"→ Parcels: {parcels_path}")
+        if not parcels_path:
             sys.exit("✘ Для режима parcel нужен --parcels <файл/URL>")
-        parcels = gpd.read_file(args.parcels)
+        parcels = gpd.read_file(parcels_path)
         gdf_vis = tx_count_per_parcel(
             parcels, gdfs, min_cover_frac=args.min_parcel_frac
         )
@@ -290,6 +295,9 @@ def main():
 
     else:  # union
         gdf_vis = union_txfrac_vec(gdfs, args.min_tx_frac)
+
+    dt_cov = time.perf_counter() - t_cov
+    print(f"\u2714 Coverage ({args.mode}) computed in {dt_cov:.1f}s")
 
     # ── переводим итоговый слой в WGS-84 ───────────────────────────
     to4326 = Transformer.from_crs(WEBM, WGS84, always_xy=True).transform

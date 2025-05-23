@@ -5,12 +5,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio, shutil, json, tempfile
 
+from coverage_app.constants import ROOT, STATIC_DIR
+
 from .worker import run_coverage_async  # см. выше
 
 app = FastAPI()
-BASE = Path(__file__).parent
-templates = Jinja2Templates(directory=str(BASE / "templates"))
-app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+templates = Jinja2Templates(directory=str(ROOT / "templates"))
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/", response_class=HTMLResponse)
