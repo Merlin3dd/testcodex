@@ -8,9 +8,9 @@ import asyncio, shutil, json, tempfile
 from .worker import run_coverage_async  # см. выше
 
 app = FastAPI()
-BASE = Path(__file__).parent
-templates = Jinja2Templates(directory=str(BASE / "templates"))
-app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+ROOT = Path(__file__).resolve().parents[2]
+templates = Jinja2Templates(directory=str(ROOT / "templates"))
+app.mount("/static", StaticFiles(directory=ROOT / "app" / "static"), name="static")
 
 
 @app.get("/", response_class=HTMLResponse)

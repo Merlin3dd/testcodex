@@ -276,6 +276,7 @@ def main():
     )
 
     # ── «участковый» или «старый» режим визуализации ────────────
+    t_cov = time.perf_counter()
     if args.mode == "parcel":
         if not args.parcels:
             sys.exit("✘ Для режима parcel нужен --parcels <файл/URL>")
@@ -290,6 +291,9 @@ def main():
 
     else:  # union
         gdf_vis = union_txfrac_vec(gdfs, args.min_tx_frac)
+
+    dt_cov = time.perf_counter() - t_cov
+    print(f"\u2714 Coverage ({args.mode}) computed in {dt_cov:.1f}s")
 
     # ── переводим итоговый слой в WGS-84 ───────────────────────────
     to4326 = Transformer.from_crs(WEBM, WGS84, always_xy=True).transform
