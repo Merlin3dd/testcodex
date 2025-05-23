@@ -1,34 +1,38 @@
 from pathlib import Path
 import asyncio, json, uuid, time
-from shapely.ops import transform          # ← было забыто
-from coverage_txfrac_async import (
-    gather_viewsheds, union_txfrac_vec,
-    tx_count_per_parcel, cover_raster_sum, raster_to_geojson
-)
+from shapely.ops import transform  # ← было забыто
+
 import geopandas as gpd
 from pyproj import Transformer
 import folium, branca.colormap as cm
 import rasterio
-import rasterio.features as rio_features   # ← ДОБАВИТЬ
+import rasterio.features as rio_features  # ← ДОБАВИТЬ
+
+from coverage_app.core.coverage_async import (
+    gather_viewsheds, union_txfrac_vec,
+    tx_count_per_parcel, cover_raster_sum, raster_to_geojson
+)
+
 WEBM, WGS84 = "EPSG:3857", "EPSG:4326"
 COLORS = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
 ]
 
+
 async def run_coverage_async(
-    tx_json_path: Path,
-    server: str = "http://10.11.0.50:8011",
-    out_dir: Path = Path("app/static/maps"),
-    out_name: str | None = None,
-    swap_axes: bool = False,
-    concurrency: int = 16,
-    max_connections: int = 32,
-    mode: str = "union",
-    min_tx_frac: float = .05,
-    parcels_path: Path | None = None,
-    min_parcel_frac: float = .05,
-    pixel_m: float = 10.,
+        tx_json_path: Path,
+        server: str = "http://10.11.0.50:8011",
+        out_dir: Path = Path("app/static/maps"),
+        out_name: str | None = None,
+        swap_axes: bool = False,
+        concurrency: int = 16,
+        max_connections: int = 32,
+        mode: str = "union",
+        min_tx_frac: float = .05,
+        parcels_path: Path | None = None,
+        min_parcel_frac: float = .05,
+        pixel_m: float = 10.,
 ) -> str:
     """
     Выполняет полный расчёт покрытия и сохраняет интерактивную карту.
@@ -59,7 +63,7 @@ async def run_coverage_async(
         cover, aff = cover_raster_sum(gdfs, pixel_m)
         gdf_vis = raster_to_geojson(cover, aff)
 
-    else:                               # union
+    else:  # union
         gdf_vis = union_txfrac_vec(gdfs, min_tx_frac)
 
     dt_cov = time.perf_counter() - t_cov
