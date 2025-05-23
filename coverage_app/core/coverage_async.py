@@ -17,7 +17,7 @@ coverage_txfrac_async.py – ускоренная версия «coverage_txfrac
 Совет: на сервере запустите `uvicorn radio_viewshed_server:app --workers 8` —
 тогда параллельные запросы действительно распределятся по CPU‑ядрам.
 """
-import argparse, asyncio, hashlib, json, sys
+import argparse, asyncio, hashlib, json, sys, time
 from pathlib import Path
 from typing import Any, List
 
@@ -28,10 +28,11 @@ from shapely.geometry import shape
 from shapely.ops import transform
 from pyproj import Transformer
 import folium, branca.colormap as cm
+from tqdm import tqdm
 import rasterio
 import rasterio.features as rio_features
 # ───────────────────────── constants ──────────────────────────
-CACHE = Path(".coverage_cache")
+CACHE = Path("../../.coverage_cache")
 CACHE.mkdir(exist_ok=True)
 WGS84 = "EPSG:4326"
 WEBM = "EPSG:3857"
@@ -117,8 +118,15 @@ async def gather_viewsheds(
             async with sem:
                 return await _fetch_viewshed(session, server, tx, idx, swap_axes, to3857)
 
-        coros = [bound_fetch(tx, i + 1) for i, tx in enumerate(txs)]
-        return await asyncio.gather(*coros)
+        tasks = [asyncio.create_task(bound_fetch(tx, i + 1))
+                 for i, tx in enumerate(txs)]
+        results = []
+        for coro in tqdm(asyncio.as_completed(tasks),
+                         total=len(tasks),
+                         desc="viewsheds",
+                         unit="tx"):
+            results.append(await coro)
+        return results
 
 
 # ───────────────────────── geometry utils ──────────────────────
@@ -253,6 +261,7 @@ def main():
                     help="Размер пикселя (м) для raster-режима")
 
     args = ap.parse_args()
+    t0 = time.perf_counter()
 
     # ── читаем список TX-запросов ───────────────────────────────
     txs = json.load(open(args.tx_json, encoding="utf-8"))
@@ -322,7 +331,8 @@ def main():
 
     folium.LayerControl().add_to(m)
     m.save(args.out)
-    print("✔ Map saved:", args.out)
+    dt = time.perf_counter() - t0
+    print(f"✔ Map saved: {args.out} in {dt:.1f}s")
 
 
 if __name__ == "__main__":
