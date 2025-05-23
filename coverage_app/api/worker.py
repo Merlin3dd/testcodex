@@ -8,6 +8,9 @@ import folium, branca.colormap as cm
 import rasterio
 import rasterio.features as rio_features  # ← ДОБАВИТЬ
 
+BASE = Path(__file__).parent
+DEFAULT_OUT_DIR = BASE / "static" / "maps"
+
 from coverage_app.core.coverage_async import (
     gather_viewsheds, union_txfrac_vec,
     tx_count_per_parcel, cover_raster_sum, raster_to_geojson
@@ -23,7 +26,7 @@ COLORS = [
 async def run_coverage_async(
         tx_json_path: Path,
         server: str = "http://10.11.0.50:8011",
-        out_dir: Path = Path("app/static/maps"),
+        out_dir: Path = DEFAULT_OUT_DIR,
         out_name: str | None = None,
         swap_axes: bool = False,
         concurrency: int = 16,
