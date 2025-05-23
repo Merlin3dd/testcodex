@@ -9,30 +9,44 @@ import rasterio
 import rasterio.features as rio_features  # ← ДОБАВИТЬ
 
 from coverage_app.core.coverage_async import (
-    gather_viewsheds, union_txfrac_vec,
-    tx_count_per_parcel, cover_raster_sum, raster_to_geojson
+    gather_viewsheds,
+    union_txfrac_vec,
+    tx_count_per_parcel,
+    cover_raster_sum,
+    raster_to_geojson,
 )
 
 WEBM, WGS84 = "EPSG:3857", "EPSG:4326"
 COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
 ]
 
 
+BASE = Path(__file__).parent
+
+
 async def run_coverage_async(
-        tx_json_path: Path,
-        server: str = "http://10.11.0.50:8011",
-        out_dir: Path = Path("/static/maps"),
-        out_name: str | None = None,
-        swap_axes: bool = False,
-        concurrency: int = 16,
-        max_connections: int = 32,
-        mode: str = "union",
-        min_tx_frac: float = .05,
-        parcels_path: Path | None = None,
-        min_parcel_frac: float = .05,
-        pixel_m: float = 10.,
+    tx_json_path: Path,
+    server: str = "http://10.11.0.50:8011",
+    out_dir: Path = BASE / "static" / "maps",
+    out_name: str | None = None,
+    swap_axes: bool = False,
+    concurrency: int = 16,
+    max_connections: int = 32,
+    mode: str = "union",
+    min_tx_frac: float = 0.05,
+    parcels_path: Path | None = None,
+    min_parcel_frac: float = 0.05,
+    pixel_m: float = 10.0,
 ) -> str:
     """
     Выполняет полный расчёт покрытия и сохраняет интерактивную карту.
@@ -47,9 +61,7 @@ async def run_coverage_async(
     txs = json.load(tx_json_path.open("r", encoding="utf-8"))
 
     # --- получаем все viewshed-слои ------------------------------------------
-    gdfs = await gather_viewsheds(
-        server, txs, swap_axes, concurrency, max_connections
-    )
+    gdfs = await gather_viewsheds(server, txs, swap_axes, concurrency, max_connections)
 
     # --- формируем итоговый слой ---------------------------------------------
     t_cov = time.perf_counter()
@@ -82,10 +94,13 @@ async def run_coverage_async(
 
     # итоговый слой покрытия  ⬇⬇⬇
     folium.GeoJson(
-        gdf_vis.to_json(), name="coverage",
+        gdf_vis.to_json(),
+        name="coverage",
         style_function=lambda f: {
             "fillColor": cmap(f["properties"]["n_tx"]),
-            "color": "black", "weight": .4, "fillOpacity": .6,
+            "color": "black",
+            "weight": 0.4,
+            "fillOpacity": 0.6,
         },
         tooltip=folium.GeoJsonTooltip(fields=["n_tx"], aliases=["TX:"]),
     ).add_to(m)
@@ -94,9 +109,12 @@ async def run_coverage_async(
     for g, col in zip([g.to_crs(WGS84) for g in gdfs], COLORS * 10):
         tid = int(g.iloc[0]["tx_id"])
         folium.GeoJson(
-            g.to_json(), name=f"Tx {tid}",
+            g.to_json(),
+            name=f"Tx {tid}",
             style_function=lambda _, c=col: {
-                "color": c, "weight": 1, "fillOpacity": .15,
+                "color": c,
+                "weight": 1,
+                "fillOpacity": 0.15,
             },
         ).add_to(m)
 
