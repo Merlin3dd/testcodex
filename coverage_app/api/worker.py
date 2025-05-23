@@ -1,9 +1,10 @@
 from pathlib import Path
-import asyncio, json, uuid
+import asyncio, json, uuid, time
 from shapely.ops import transform          # ← было забыто
-from coverage_txfrac_async import (
+from coverage_app.core.coverage_async import (
     gather_viewsheds, union_txfrac_vec,
-    tx_count_per_parcel, cover_raster_sum, raster_to_geojson
+    tx_count_per_parcel, cover_raster_sum,
+    raster_to_geojson, find_parcels
 )
 import geopandas as gpd
 from pyproj import Transformer
@@ -19,7 +20,7 @@ COLORS = [
 async def run_coverage_async(
     tx_json_path: Path,
     server: str = "http://10.11.0.50:8011",
-    out_dir: Path = Path("app/static/maps"),
+    out_dir: Path = Path(__file__).resolve().parents[2] / "static/maps",
     out_name: str | None = None,
     swap_axes: bool = False,
     concurrency: int = 16,
@@ -48,9 +49,11 @@ async def run_coverage_async(
     )
 
     # --- формируем итоговый слой ---------------------------------------------
+    t_cov = time.perf_counter()
     if mode == "parcel":
         if not parcels_path:
-            raise ValueError("Для режима parcel требуется файл parcels")
+            parcels_path = find_parcels()
+            print(f"✔ Using parcels: {parcels_path}")
         parcels = gpd.read_file(parcels_path)
         gdf_vis = tx_count_per_parcel(parcels, gdfs, min_parcel_frac)
 
@@ -60,6 +63,9 @@ async def run_coverage_async(
 
     else:                               # union
         gdf_vis = union_txfrac_vec(gdfs, min_tx_frac)
+
+    dt_cov = time.perf_counter() - t_cov
+    print(f"\u2714 Coverage ({mode}) computed in {dt_cov:.1f}s")
 
     # --- перевод в WGS-84 -----------------------------------------------------
     to4326 = Transformer.from_crs(WEBM, WGS84, always_xy=True).transform

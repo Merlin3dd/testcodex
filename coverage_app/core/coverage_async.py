@@ -32,8 +32,10 @@ from tqdm import tqdm
 import rasterio
 import rasterio.features as rio_features
 # ───────────────────────── constants ──────────────────────────
-CACHE = Path("../../.coverage_cache")
+ROOT = Path(__file__).resolve().parents[2]
+CACHE = ROOT / ".coverage_cache"
 CACHE.mkdir(exist_ok=True)
+PARCELS_DIR = ROOT / "parcels"
 WGS84 = "EPSG:4326"
 WEBM = "EPSG:3857"
 COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
@@ -41,6 +43,14 @@ COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
 
 
 # ───────────────────────── helpers ────────────────────────────
+
+def find_parcels(dir_path: Path = PARCELS_DIR) -> Path:
+    """Return newest GeoJSON/GPKG file from ``dir_path``."""
+    candidates = [p for p in dir_path.glob("*")
+                  if p.suffix.lower() in {".geojson", ".gpkg"}]
+    if not candidates:
+        raise FileNotFoundError(f"No parcels file found in {dir_path}")
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def _h(o: Any) -> str:
@@ -276,9 +286,11 @@ def main():
     )
 
     # ── «участковый» или «старый» режим визуализации ────────────
+    t_cov = time.perf_counter()
     if args.mode == "parcel":
         if not args.parcels:
-            sys.exit("✘ Для режима parcel нужен --parcels <файл/URL>")
+            args.parcels = find_parcels()
+            print(f"✔ Using parcels: {args.parcels}")
         parcels = gpd.read_file(args.parcels)
         gdf_vis = tx_count_per_parcel(
             parcels, gdfs, min_cover_frac=args.min_parcel_frac
@@ -290,6 +302,9 @@ def main():
 
     else:  # union
         gdf_vis = union_txfrac_vec(gdfs, args.min_tx_frac)
+
+    dt_cov = time.perf_counter() - t_cov
+    print(f"\u2714 Coverage ({args.mode}) computed in {dt_cov:.1f}s")
 
     # ── переводим итоговый слой в WGS-84 ───────────────────────────
     to4326 = Transformer.from_crs(WEBM, WGS84, always_xy=True).transform
