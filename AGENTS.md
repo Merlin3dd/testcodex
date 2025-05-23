@@ -19,10 +19,7 @@
 | `main.py`           | Command‑line aggregator that combines multiple coverage rasters into a single composite.                                   |
 | `index.html`        | Stand‑alone Leaflet map to preview layers produced by the server.                                                          |
 
-### Invariants
-
-1. Do **not** hard‑code absolute paths; all IO paths must be provided via CLI or environment variables.
-2. Do **not** commit files generated under `.coverage_cache/` or `.dem_cache/`.
+ 
 
 ## Directory layout
 
