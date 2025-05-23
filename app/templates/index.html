@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8"/>
+    <title>Coverage TXFrac • UI</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"/>
+  </head>
+
+  <body class="container py-4">
+    <h1 class="mb-4">Генерация карты покрытия</h1>
+
+    <form action="/run" method="post" enctype="multipart/form-data">
+      <!-- обязательный TX-JSON -->
+      <div class="mb-3">
+        <label class="form-label">Файл TX-JSON</label>
+        <input class="form-control" type="file" name="tx_json" required>
+        <div class="form-text">Массив JSON-объектов запросов к /radio_viewshed</div>
+      </div>
+
+      <!-- режим работы -->
+      <div class="mb-3">
+        <label class="form-label">Режим</label>
+        <select class="form-select" name="mode">
+          <option value="union" selected>union (по умолчанию)</option>
+          <option value="parcel">parcel — слой участков</option>
+          <option value="raster">raster mask</option>
+        </select>
+      </div>
+
+      <!-- (опц.) файл parcels -->
+      <div class="mb-3">
+        <label class="form-label">Файл parcels (parcel-режим)</label>
+        <input class="form-control" type="file" name="parcels">
+      </div>
+
+      <!-- числовые параметры -->
+      <div class="row g-2">
+        <div class="col">
+          <label class="form-label">min_tx_frac</label>
+          <input class="form-control" type="number" step="0.01"
+                 name="min_tx_frac" value="0.05">
+        </div>
+        <div class="col">
+          <label class="form-label">min_parcel_frac</label>
+          <input class="form-control" type="number" step="0.01"
+                 name="min_parcel_frac" value="0.05">
+        </div>
+        <div class="col">
+          <label class="form-label">pixel_m</label>
+          <input class="form-control" type="number" name="pixel_m" value="10">
+        </div>
+      </div>
+
+      <div class="row g-2 mt-2">
+        <div class="col">
+          <label class="form-label">concurrency</label>
+          <input class="form-control" type="number" name="concurrency" value="16">
+        </div>
+        <div class="col">
+          <label class="form-label">max_connections</label>
+          <input class="form-control" type="number" name="max_connections" value="32">
+        </div>
+      </div>
+
+      <!-- переключатели -->
+      <div class="form-check form-switch mt-3">
+        <input class="form-check-input" type="checkbox" name="swap_axes">
+        <label class="form-check-label">Поменять lon/lat в GeoJSON-ответе</label>
+      </div>
+
+      <!-- NEW: имя выходного файла -->
+      <div class="mb-3 mt-3">
+        <label class="form-label">Имя выходного файла (.html, опционально)</label>
+        <input class="form-control" type="text" name="out_name"
+               placeholder="coverage_custom.html">
+        <div class="form-text">Если оставить пустым — будет сгенерировано автоматически.</div>
+      </div>
+
+      <button class="btn btn-primary mt-4" type="submit">Сгенерировать</button>
+    </form>
+  </body>
+</html>

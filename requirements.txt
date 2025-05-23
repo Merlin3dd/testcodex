@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+jinja2
+httpx
+geopandas
+shapely>=1.8
+folium
+branca
+rasterio
+numpy
+pandas
+orjson
